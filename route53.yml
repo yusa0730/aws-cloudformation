@@ -1,0 +1,118 @@
+### [Change System Name] ishizawa-aws-test
+### [Change Domain Name] awsmaster.jp
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Create Route53 HostedZone
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test
+  DomainName:
+    Description: Domain Name
+    Type: String
+    Default: ishizawa-aws-test.site
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+
+## AWS::CloudFormation::InterfaceはParameterの順番を定義するもので、それほど重要ではない
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - DomainName
+          - Environment
+
+## 条件式をここで定義 Environmentの出力された値がprodだったらtrue,違ったらfalseがisProdの値になる。
+Conditions:
+  isProd: !Equals [ !Ref Environment, prod]
+
+Resources:
+  ## Hosted Zone https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-route53-hostedzone.html
+  ## 新しいパブリックまたはプライベートホストゾーンを作成します。パブリックホストゾーンにレコードを作成して、example.comなどのドメインとそのサブドメイン（apex.example.com、acme.example.com）に対するインターネット上のトラフィックのルーティング方法を定義することができます
+  HostedZone:
+    Type: AWS::Route53::HostedZone
+    Properties:
+      ## DomainNameはishizawa-aws-test.site
+      Name: !If [ isProd, !Ref DomainName, !Sub "${Environment}.${DomainName}" ]
+      ## optionalなコメントを残すもの。必須でない。
+      HostedZoneConfig:
+        Comment: !Sub ${SystemName}-${Environment}-hostedzone
+      ## ヘルスチェックまたはホストされたゾーンのタグを追加、編集、または削除します。 必須ではない
+      HostedZoneTags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-hostedzone
+
+  ## Record Set: CAA https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-route53-recordset.html
+  ## CAAはSSLサーバー証明書を第三者が勝手に発行することを防止するためのレコード
+  RecordSetCaa:
+    #isProdがtrueの時はこのRecordSetCaaのresourceが作成される。falseの場合は作成されない。
+    Condition: isProd
+    Type: AWS::Route53::RecordSet
+    Properties:
+      ## レコードを作成したいホストゾーンを指定する。必須ではない
+      HostedZoneId: !Ref HostedZone
+      ## ChangeResourceRecordSetsリクエストの場合、作成、更新、または削除したいレコードの名前。ListResourceRecordSets 応答では、指定されたホストされたゾーンのレコードの名前。
+      ## 必須項目
+      Name: !Ref DomainName
+      ## 必須項目
+      Type: CAA
+      ## Type プロパティに指定した値に対応する 1 つまたは複数の値
+      ##　必須ではない
+      ResourceRecords:
+        - '0 issue "amazon.com"'
+      ## リソースレコードのキャッシュの生存時間 (TTL) を秒単位で指定
+      ## 必須ではない
+      ## 1時間
+      TTL: 3600
+
+Outputs:
+  ## Hosted Zone
+  HostedZone:
+    Value: !Ref HostedZone
+    Export:
+      Name: !Sub ${AWS::StackName}-HostedZone
+
+  HostedZoneDomainName:
+    Value: !If [ isProd, !Ref DomainName, !Sub "${Environment}.${DomainName}" ]
+    Export:
+      ## ishizawa-aws-test-prod-route53
+      Name: !Sub ${AWS::StackName}-HostedZoneDomainName
+
+  HostedZoneNameServer1:
+    ## ロジカルid.
+    Value: !Select [ 0, !GetAtt HostedZone.NameServers ]
+    Export:
+      Name: !Sub ${AWS::StackName}-HostedZoneNameServer1
+
+  HostedZoneNameServer2:
+    Value: !Select [ 1, !GetAtt HostedZone.NameServers ]
+    Export:
+      Name: !Sub ${AWS::StackName}-HostedZoneNameServer2
+
+  HostedZoneNameServer3:
+    Value: !Select [ 2, !GetAtt HostedZone.NameServers ]
+    Export:
+      Name: !Sub ${AWS::StackName}-HostedZoneNameServer3
+
+  HostedZoneNameServer4:
+    Value: !Select [ 3, !GetAtt HostedZone.NameServers ]
+    Export:
+      Name: !Sub ${AWS::StackName}-HostedZoneNameServer4
+
+  ## Record Set: CAA
+  RecordSetCaa:
+    Condition: isProd
+    Value: !Ref RecordSetCaa
+    ## ishizawa-aws-test-prod-route53-RecordSetCaa
+    Export:
+      Name: !Sub ${AWS::StackName}-RecordSetCaa

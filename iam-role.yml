@@ -1,0 +1,200 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create AWS IAM Role etc. 全体で使う用のIam Role
+
+Resources:
+  ## IAM: Managed Policy (AmazonSSMGetParametersPolicy)
+  AmazonSSMGetParametersPolicy:
+    ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-iam-managedpolicy.html
+    ## AWS アカウントの新しいマネージドポリシーを作成します。この操作では、バージョン識別子が v1 のポリシーバージョンを作成し、v1 をポリシーのデフォルトバージョンとして設定します。
+    ## 管理ポリシー カスタマー管理ポリシー
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ## ポリシーのフレンドリ名。
+      ManagedPolicyName: AmazonSSMGetParametersPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+            Resource: '*'
+
+  ## IAM: Managed Policy (SecretsManagerGetSecretValuePolicy)
+  ## viaelbで利用する
+  SecretsManagerGetSecretValuePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: SecretsManagerGetSecretValuePolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: secretsmanager:GetSecretValue
+            Resource: '*'
+
+  ## IAM: Managed Policy (AmazonECSExecuteCommandPolicy)
+  ## Ref: https://docs.aws.amazon.com/ja_jp/AmazonECS/latest/developerguide/ecs-exec.html
+  AmazonECSExecuteCommandPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: AmazonECSExecuteCommandPolicy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            ## https://docs.aws.amazon.com/ja_jp/service-authorization/latest/reference/list_amazonsessionmanagermessagegatewayservice.html
+            Action:
+                  ## インスタンスが Systems Manager サービスにコントロールメッセージを送信するためのコントロールチャネルを登録するアクセス権限を付与します
+                  - ssmmessages:CreateControlChannel
+                  ## インスタンスが Systems Manager サービスにデータメッセージを送信するためのデータチャネルを登録するアクセス権限を付与します
+                  - ssmmessages:CreateDataChannel
+                  ## インスタンスから Systems Manager サービスへの登録済みコントロールチャネルストリームの WebSocket 接続を開くアクセス権限を付与します
+                  - ssmmessages:OpenControlChannel
+                  ## インスタンスから Systems Manager サービスへの登録済みデータチャネルストリームの WebSocket 接続を開くアクセス権限を付与します
+                  - ssmmessages:OpenDataChannel
+            Resource: '*'
+
+  ## IAM: Role (AmazonECSTaskExecutionRole)
+  ## Amazon ECS Task Execution IAM Role - Amazon Elastic Container Service
+  ## https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html
+  ## https://docs.aws.amazon.com/ja_jp/IAM/latest/UserGuide/reference_policies_elements_principal.html
+  AmazonECSTaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      ## IAMロールの名前。長さは64文字まで。有効な値については、『IAMユーザガイド』のCreateRoleアクションのRoleNameパラメータを参照してください。
+      ## Required: No
+      RoleName: AmazonECSTaskExecutionRole
+      ## このロールに関連付けられた信頼ポリシー。トラストポリシーは、どのエンティティがロールを引き受けることができるかを定義します
+      ## Required: Yes
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            ## リソースベースの JSON ポリシーの Principal 要素を使用して、リソースへのアクセスを許可または拒否するプリンシパルを指定します。
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ## ロールにアタッチしたいIAMマネージドポリシーのAmazonリソース名（ARN）のリスト
+      ## Required: No
+      ## 一つ目のpolicyはすでにAWSが作成しているpolicy
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+        - Ref: AmazonSSMGetParametersPolicy
+        - Ref: SecretsManagerGetSecretValuePolicy
+
+  ## IAM: Role (AmazonSSMManagedECSInstanceRole)
+  ## Amazon ECS Container Instance IAM Role - Amazon Elastic Container Service
+  ## Ref. https://docs.aws.amazon.com/AmazonECS/latest/developerguide/instance_IAM_role.html
+  ## Step 2: Verify or Create an IAM Instance Profile with Session Manager Permissions - AWS Systems Manager
+  ## Ref. https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-getting-started-instance-profile.html
+  AmazonSSMManagedECSInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmazonSSMManagedECSInstanceRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        ## Default policy for the Amazon EC2 Role for Amazon EC2 Container Service.
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceforEC2Role
+        ## To use Session Manager
+        ## https://dev.classmethod.jp/articles/not-recommended-amazonec2roleforssm/
+        ## The policy for Amazon EC2 Role to enable AWS Systems Manager service core functionality.
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+  ## IAM: InstanceProfile (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      ## 作成するインスタンスプロファイルの名前です。
+      ## このパラメータでは、（正規表現パターンにより）大文字と小文字の英数字からなる文字列を、スペースを入れずに指定することができます。また、以下の文字のいずれかを含めることができます。_+=,.@-
+      InstanceProfileName: !Ref AmazonSSMManagedECSInstanceRole
+      ## インスタンスプロファイルと関連付けるロールの名前です。EC2インスタンスに一度に割り当てられるロールは1つだけで、インスタンス上のすべてのアプリケーションは同じロールと権限を共有する。
+      ## Required: Yes
+      Roles:
+        - Ref: AmazonSSMManagedECSInstanceRole
+
+  ## IAM: Role (AmazonRDSEnhancedMonitoringRole)
+  ## Ref. https://docs.aws.amazon.com/ja_jp/AmazonRDS/latest/UserGuide/USER_Monitoring.OS.html
+  AmazonRDSEnhancedMonitoringRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: AmazonRDSEnhancedMonitoringRole
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: monitoring.rds.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonRDSEnhancedMonitoringRole
+
+Outputs:
+  ## IAM: Managed Policy (AmazonSSMGetParametersPolicy)
+  AmazonSSMGetParametersPolicy:
+    Value: !Ref AmazonSSMGetParametersPolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMGetParametersPolicy
+
+  ## IAM: Managed Policy (SecretsManagerGetSecretValuePolicy)
+  SecretsManagerGetSecretValuePolicy:
+    Value: !Ref SecretsManagerGetSecretValuePolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-SecretsManagerGetSecretValuePolicy
+
+  ## IAM: Managed Policy (AmazonECSExecuteCommandPolicy)
+  AmazonECSExecuteCommandPolicy:
+    Value: !Ref AmazonECSExecuteCommandPolicy
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSExecuteCommandPolicy
+
+  ## IAM: Role (AmazonECSTaskExecutionRole)
+  AmazonECSTaskExecutionRole:
+    Value: !Ref AmazonECSTaskExecutionRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSTaskExecutionRole
+
+  AmazonECSTaskExecutionRoleArn:
+    Value: !GetAtt AmazonECSTaskExecutionRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonECSTaskExecutionRoleArn
+
+  ## IAM: Role (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceRole:
+    Value: !Ref AmazonSSMManagedECSInstanceRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceRole
+
+  AmazonSSMManagedECSInstanceRoleArn:
+    Value: !GetAtt AmazonSSMManagedECSInstanceRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceRoleArn
+
+  ## IAM: InstanceProfile (AmazonSSMManagedECSInstanceRole)
+  AmazonSSMManagedECSInstanceProfile:
+    Value: !Ref AmazonSSMManagedECSInstanceProfile
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceProfile
+
+  AmazonSSMManagedECSInstanceProfileArn:
+    Value: !GetAtt AmazonSSMManagedECSInstanceProfile.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonSSMManagedECSInstanceProfileArn
+
+  ## IAM: Role (AmazonRDSEnhancedMonitoringRole)
+  AmazonRDSEnhancedMonitoringRole:
+    Value: !Ref AmazonRDSEnhancedMonitoringRole
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonRDSEnhancedMonitoringRole
+
+  AmazonRDSEnhancedMonitoringRoleArn:
+    Value: !GetAtt AmazonRDSEnhancedMonitoringRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-AmazonRDSEnhancedMonitoringRoleArn

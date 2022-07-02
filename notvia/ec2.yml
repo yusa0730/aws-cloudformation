@@ -1,0 +1,313 @@
+---
+### [Change System Name] ishizawa-aws-test
+### ImportValue: vpc, route53
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create EC2 Instance etc.
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  SubDomain:
+    Description: Sub Domain
+    Type: String
+    Default: ec2
+    ## .以外の0文字以上の文字
+    AllowedPattern: ^[^.]*$
+  ResourceName:
+    Description: Resource Name
+    Type: String
+    Default: notvia
+  S3URL:
+    Description: S3URL
+    Type: String
+    Default: ishizawa-aws-test-ssm-outputs
+  EC2ImageId:
+    Description: >
+      Specifies the AMI ID for your instances.
+      https://aws.amazon.com/jp/blogs/news/query-for-the-latest-amazon-linux-ami-ids-using-aws-systems-manager-parameter-store/
+      e.g. amzn2-ami-hvm-2.0.20201218.1-x86_64-gp2
+    ## https://aws.amazon.com/jp/blogs/news/query-for-the-latest-amazon-linux-ami-ids-using-aws-systems-manager-parameter-store/
+    ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/parameters-section-structure.html
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - SubDomain
+          - ResourceName
+          - EC2ImageId
+
+Resources:
+  ## IAM: Role
+  ## このインスタンスにだけつけるためのIAM Role。部分的なものなのでiam-role.ymlには記載していない。
+  IAMRole:
+    ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-iam-role.html
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-role
+      ## このロールに関連付けられた信頼ポリシー。トラストポリシーは、どのエンティティがロールを引き受けることができるかを定義します。
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          ## ec2にお面を被せるロール。何用のロールかを指定している。
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            ## https://dev.classmethod.jp/articles/iam-role-passrole-assumerole/
+            Action: sts:AssumeRole
+      ## ロールにアタッチしたいIAMマネージドポリシーのAmazonリソース名（ARN）のリストです。
+      ## AWSが作ったポリシーをアタッチ
+      ManagedPolicyArns:
+        ## To use the Session Manager
+        ## https://dev.classmethod.jp/articles/not-recommended-amazonec2roleforssm/
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      ## インラインポリシー(自分で作成したポリシーをアタッチする)
+      ## このEC2でしか利用しないpolicy
+      Policies:
+        - PolicyName: AmazonS3CFGetObjectPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: "*"
+              - Effect: Allow
+                Action: s3:ListAllMyBuckets
+                Resource: !Sub arn:aws:s3:::cf-${AWS::AccountId}-${AWS::Region}
+              - Effect: Allow
+                Action: s3:GetObject
+                Resource: !Sub arn:aws:s3:::cf-${AWS::AccountId}-${AWS::Region}/*
+              - Effect: Allow
+                Action: s3:PutObject
+                Resource: arn:aws:s3:::ishizawa-aws-test-ssm-outputs/EC2logs/*
+
+  ## IAM RoleとInstance ProfileのARNは別物
+  ## IAM: Instance Profile
+  IAMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref IAMRole
+      Roles:
+        - !Ref IAMRole
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group.html
+    ## セキュリティグループを指定します。セキュリティグループを作成するには、VpcId プロパティを使用して、セキュリティグループを作成する VPC を指定します。
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      ## 後から変更できないのでつけるかは要判断
+      ## どのリソースになんというセキュリティグループがついているかがわかるように名前をつける
+      ## リソースごとにセキュリティグループを作るのがポイント
+      GroupName: !Sub ${SystemName}-${Environment}-ec2-sg
+      GroupDescription: !Sub ${SystemName}-${Environment}-ec2-sg
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+
+  ## EC2(VPC): Security Group Inbound Rule From Any (HTTP)
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-security-group-ingress.html
+  ## EC2のENIにつけている(オンプレの考え方)
+  ## どこからどこへの通信が許可されたのかを意識。名前に反映させる
+  EC2SecurityGroupIngressHttp:
+    ## セキュリティグループにインバウンドルールを追加します。
+    ## 受信ルールは、指定されたIPv4またはIPv6のCIDRアドレス範囲からの、または指定されたセキュリティグループに関連付けられたインスタンスからのトラフィックを受信することをインスタンスに許可します。
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      ## IPプロトコル名（tcp、udp、icmp、icmpv6）または番号（「プロトコル番号」を参照）です。
+      ## Required: Yes
+      IpProtocol: tcp
+      ## FromPort: 443 ToPort: 443 の通信が必要になった場合はもう一つ同じAWS::EC2::SecurityGroupIngressを設定
+      FromPort: 80
+      ToPort: 80
+      ## 全てのIPアドレス。今回はインターネット
+      CidrIp: 0.0.0.0/0
+      Description: any
+
+  ## EC2: Instance
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+  ## macアドレスは物理アドレスで世界で一意のアドレス
+  Instance:
+    ## EC2インスタンスを指定します。インスタンスにElastic IPアドレスがアタッチされている場合、AWS CloudFormationはインスタンスをアップデートした後にElastic IPアドレスを再アタッチします。
+    Type: AWS::EC2::Instance
+    ## To retain the instance to be replaced when updating the instance
+    ## AMIIDが変わってしまうことがある。維持した状態でアップデートする。
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId: !Ref EC2ImageId
+      InstanceType: t2.micro
+      ## IAMインスタンスプロファイルの名前です。新しいIAMインスタンスプロファイルを作成するには、AWS::IAM::InstanceProfileリソースを使用します。
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ## 厳密にいうとENIの設定値
+      SubnetId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
+      ## セキュリティグループのIDです。セキュリティグループは、CreateSecurityGroup を使用して作成することができます。
+      ## ネットワーク・インタフェースを指定する場合は、ネットワーク・インタフェースの一部と してセキュリティ・グループを指定する必要があります。
+      ## 厳密にいうとENIの設定値
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      ## インスタンスの詳細監視を有効にするかどうかを指定します。
+      Monitoring: false
+      ## インスタンスで利用できるようにするためのユーザーデータスクリプト。詳細については、起動時にLinuxインスタンスでコマンドを実行する、および起動時にWindowsインスタンスでコマンドを実行するを参照してください。
+      ## コマンドラインツールを使用している場合、base64エンコーディングが実行され、ファイルからテキストを読み込むことができます。それ以外の場合は、base64エンコードされたテキストを提供する必要があります。ユーザーデータは16KBに制限されています。
+      ## ln -s ファイルの“シンボリックリンク”を作成できます。シンボリックリンクは、いわばファイルの“別名”で、長いファイル名に別の名前を付けたり、パス名の指定が分かりにくい場所にあるファイルを扱いやすくしたりする
+      ## curl -L (HTTP) サーバーがリクエストされたページが別の場所に移動したことを報告した場合 (Location: ヘッダーと 3XX 応答コードで示されます)、このオプションは curl に新しい場所でのリクエストをやり直させます
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum -y update
+          aws configure set default.region ${AWS::Region}
+          amazon-linux-extras install docker -y
+          systemctl enable docker.service
+          systemctl start docker.service
+          curl -L "https://github.com/docker/compose/releases/download/1.27.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+          docker run --name nginx --restart=always -d -p 80:80 nginx
+      ## To change the volume type from gp2 to gp3
+      ## 起動時にインスタンスにアタッチするブロックデバイスを定義するブロックデバイスマッピングのエントリです。
+      ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-blockdev-mapping.html
+      ## 予め使う容量が分かっているなら設定した方が良い。
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-blockdev-template.html
+          ## 後から増やすこともできる。運用で関わる部分。
+          ## EC2では一時的なファイルを置いたりする。
+          Ebs:
+            VolumeSize: 8
+            ## コンピューターにくっついているssd
+            VolumeType: gp3
+            ## インスタンス終了時にEBSボリュームを削除するかどうかを示します
+            DeleteOnTermination: true
+            ## ボリュームが暗号化されるべきかどうかを示します。
+            ## 暗号化状態をtrueに設定した場合の効果は、ボリュームの起源（新規またはスナップショットから）、暗号化状態の開始、所有権、およびデフォルトでの暗号化が有効かどうかに依存します
+            Encrypted: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}
+
+  ## EC2: EIP
+  EIP:
+    ## Elastic IP (EIP) アドレスを指定し、オプションでそれを Amazon EC2 インスタンスに関連付けることができます。
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      InstanceId: !Ref Instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2
+
+  ## Route53: RecordSet (IPv4)
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-route53-recordset.html
+  Route53RecordSetIPv4:
+    ## 作成したいレコードの情報。
+    ## AWS::Route53::RecordSetタイプは、スタンドアロンリソースとして、またはAWS::Route53::RecordSetGroupタイプの組み込みプロパティとして使用することが可能です。
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZone
+      Name: !Sub
+        - "${SubDomain}.${DomainName}."
+        - DomainName:
+            Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Type: A
+      ResourceRecords:
+        - !Ref EIP
+      TTL: "300"
+
+Outputs:
+  ## IAM: Role
+  IAMRole:
+    Value: !Ref IAMRole
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRole
+
+  IAMRoleArn:
+    Value: !GetAtt IAMRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRoleArn
+
+   ## IAM: Instance Profile
+  IAMInstanceProfile:
+    Value: !Ref IAMInstanceProfile
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfile
+
+  IAMInstanceProfileArn:
+    Value: !GetAtt IAMInstanceProfile.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfileArn
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroup
+
+  EC2SecurityGroupVpcId:
+    Value: !GetAtt EC2SecurityGroup.VpcId
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroupVpcId
+
+  ## EC2: Instance
+  Instance:
+    Value: !Ref Instance
+    Export:
+      Name: !Sub ${AWS::StackName}-Instance
+
+  InstanceAvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+    Export:
+      Name: !Sub ${AWS::StackName}-InstanceAvailabilityZone
+
+  InstancePrivateDnsName:
+    Value: !GetAtt Instance.PrivateDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateDnsName
+
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateIp
+
+  InstancePublicDnsName:
+    Value: !GetAtt Instance.PublicDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePublicDnsName
+
+  InstancePublicIp:
+    Value: !GetAtt Instance.PublicIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePublicIp
+
+  ## EC2: EIP
+  EIP:
+    Value: !Ref EIP
+    Export:
+      Name: !Sub ${AWS::StackName}-EIP
+
+  ## Route53: RecordSet (IPv4)
+  Route53RecordSetIPv4:
+    Value: !Ref Route53RecordSetIPv4
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53RecordSetIPv4
+

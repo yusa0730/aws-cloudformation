@@ -1,0 +1,563 @@
+### Parametersとして、SystemNameとEnvironmentとCreateSubnetProtectedが定義されている
+---
+### [Change System Name] ishizawa-aws-test
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create VPC, Internet Gateway, Subnet, Route Table, VPC Endpoint etc.
+
+Mappings:
+  EnvironmentMap:
+    prod:
+      VPCCidrBlock: 10.0.0.0/19
+      ## SubnetPublicCidrBlock = 10.0.0.0/22 (AvailabilityZone A+C+D+?)
+      PublicSubnetACidrBlock: 10.0.0.0/24
+      PublicSubnetCCidrBlock: 10.0.1.0/24
+      PublicSubnetDCidrBlock: 10.0.2.0/24
+    # PublicSubnet?CidrBlock: 10.0.3.0/24
+      ## SubnetProtectedCidrBlock = 10.0.4.0/22 (AZ A+C+D+?)
+      ProtectedSubnetACidrBlock: 10.0.4.0/24
+      ProtectedSubnetCCidrBlock: 10.0.5.0/24
+      ProtectedSubnetDCidrBlock: 10.0.6.0/24
+    # ProtectedSubnet?CidrBlock: 10.0.7.0/24
+      ## SubnetPrivateCidrBlock = 10.0.8.0/22 (AZ A+C+D+?)
+      PrivateSubnetACidrBlock: 10.0.8.0/24
+      PrivateSubnetCCidrBlock: 10.0.9.0/24
+      PrivateSubnetDCidrBlock: 10.0.10.0/24
+    # PrivateSubnet?CidrBlock: 10.0.11.0/24
+    stg:
+      VPCCidrBlock: 10.0.32.0/19
+      ## SubnetPublicCidrBlock = 10.0.32.0/22 (AZ A+C+D+?)
+      PublicSubnetACidrBlock: 10.0.32.0/24
+      PublicSubnetCCidrBlock: 10.0.33.0/24
+      PublicSubnetDCidrBlock: 10.0.34.0/24
+    # PublicSubnet?CidrBlock: 10.0.35.0/24
+      ## SubnetProtectedCidrBlock = 10.0.36.0/22 (AZ A+C+D+?)
+      ProtectedSubnetACidrBlock: 10.0.36.0/24
+      ProtectedSubnetCCidrBlock: 10.0.37.0/24
+      ProtectedSubnetDCidrBlock: 10.0.38.0/24
+    # ProtectedSubnet?CidrBlock: 10.0.39.0/24
+      ## SubnetPrivateCidrBlock = 10.0.40.0/22 (AZ A+C+D+?)
+      PrivateSubnetACidrBlock: 10.0.40.0/24
+      PrivateSubnetCCidrBlock: 10.0.41.0/24
+      PrivateSubnetDCidrBlock: 10.0.42.0/24
+      # PrivateSubnet?CidrBlock: 10.0.43.0/24
+    dev:
+      VPCCidrBlock: 10.0.64.0/19
+      ## SubnetPublicCidrBlock = 10.0.64.0/22 (AZ A+C+D+?)
+      PublicSubnetACidrBlock: 10.0.64.0/24
+      PublicSubnetCCidrBlock: 10.0.65.0/24
+      PublicSubnetDCidrBlock: 10.0.66.0/24
+    # PublicSubnet?CidrBlock: 10.0.67.0/24
+      ## SubnetProtectedCidrBlock = 10.0.68.0/22 (AZ A+C+D+?)
+      ProtectedSubnetACidrBlock: 10.0.68.0/24
+      ProtectedSubnetCCidrBlock: 10.0.69.0/24
+      ProtectedSubnetDCidrBlock: 10.0.70.0/24
+    # ProtectedSubnet?CidrBlock: 10.0.71.0/24
+      ## SubnetPrivateCidrBlock = 10.0.72.0/22 (AZ A+C+D+?)
+      PrivateSubnetACidrBlock: 10.0.72.0/24
+      PrivateSubnetCCidrBlock: 10.0.73.0/24
+      PrivateSubnetDCidrBlock: 10.0.74.0/24
+    # PrivateSubnet?CidrBlock: 10.0.75.0/24
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  CreateSubnetProtected:
+    Description: Create Protected Subnet
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+## AWS::CloudFormation::InterfaceはParameterの順番を定義するもので、それほど重要ではない
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - CreateSubnetProtected
+
+Conditions:
+  ShouldCreateSubnetProtected: !Equals [ !Ref CreateSubnetProtected, true ]
+
+Resources:
+  ## VPC
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc.html
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, VPCCidrBlock ]
+      ## VPC内で起動したインスタンスがDNSホスト名を取得するかどうかを示します。有効な場合、VPC内のインスタンスはDNSホスト名を取得し、無効な場合は取得しません
+      ## 必須ではない
+      ## IPアドレス対応するDNSを作成
+      EnableDnsHostnames: true
+      ## VPCでDNS解決がサポートされているかどうかを示します。有効な場合、169.254.169.253 IPアドレスのAmazon提供DNSサーバー、またはVPCネットワーク範囲「プラス2」の基点にある予約IPアドレスへのクエリが成功します。
+      ## 無効な場合、パブリックDNSのホスト名をIPアドレスに解決するVPC内のAmazon provided DNSサービスは有効ではありません。デフォルトでは有効です。
+      ## 必須ではない
+      ## trueでフルサービスリゾルバが利用可能になる。
+      ## VPC 用の DNS サーバー (Amazon Route 53 Resolver) を提供しています。
+      EnableDnsSupport: true
+      ## VPCに起動するインスタンスの許容テナント。
+      ## ハードウェア占有のことで物理サーバーを占有する必要があるときだけdefault以外の設定にする。
+      ## 物理的なサーバー上に他のユーザーの仮想サーバーが乗らなくなる設定
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-vpc
+
+      ## network ACLはあまり利用しない。
+
+  ## Internet Gateway
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-internetgateway.html
+  ## VPCで使用するインターネットゲートウェイを割り当てます。インターネットゲートウェイを作成した後、それをVPCにアタッチします。
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-igw
+
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpc-gateway-attachment.html
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      ## InternetGatewayIdまたはVpnGatewayIdのどちらかを指定する必要があり、両方指定することはできません。
+      ## 必須でない
+      InternetGatewayId: !Ref InternetGateway
+      ## 必須
+      VpcId: !Ref VPC
+
+  ## Route Table: public
+  ## 指定したVPCのルートテーブルを指定します。ルートテーブルを作成した後、ルートを追加し、テーブルをサブネットに関連付けることができます。
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-routetable.html
+  RouteTablePublic:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      ## 必須
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-public-rtb
+
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-route.html
+  ## VPC 内のルートテーブルの経路を指定します。DestinationCidrBlockまたはDestinationIpv6CidrBlockのいずれかと、対象リソースのいずれかのIDを指定する必要があります。
+  RoutePublicDefault:
+    Type: AWS::EC2::Route
+    ## AWS::EC2::RouteリソースにDependsOn属性を追加し、AWS::EC2::TransitGatewayAttachmentリソースへの依存を明示的に宣言する。
+    ## DependsOn 属性を使用すると、特定のリソースが他のリソースに続けて作成されるように指定できます。
+    ## VPCGatewayAttachmentが完成したらこのリソースを作り始めます。->InternetGatewayにアタッチが完了してないとVPC内で利用できない。
+    ## わざと明記している。ymlは上から順番にリソースを作成しているわけではない。
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      ## 宛先一致に使用する IPv4 の CIDR ブロック。
+      ## 0.0.0.0/0 これはインターネットに向かう通信が飛ぶようになります。
+      ## 0.0.0.0/0はIpv4のIPアドレス全部.0.0.0.0.0~255.255.255.255
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      ## 必須
+      RouteTableId: !Ref RouteTablePublic
+
+  ## Subnet: public-a
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnet.html
+  SubnetPublicA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PublicSubnetACidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-public-subnet-a
+
+  ## https://docs.aws.amazon.com/pt_br/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-subnetroutetableassociation.html
+  SubnetRouteTableAssociationPublicA:
+    ## サブネットとルートテーブルを関連付けます。サブネットとルートテーブルは、同じVPC内にある必要があります。この関連付けにより、サブネットから発生するトラフィックは、ルートテーブルのルートに従ってルーティングされるようになります。
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicA
+      RouteTableId: !Ref RouteTablePublic
+
+  ## Subnet: public-c
+  SubnetPublicC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PublicSubnetCCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}c
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-public-subnet-c
+
+  SubnetRouteTableAssociationPublicC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicC
+      RouteTableId: !Ref RouteTablePublic
+
+  ## Subnet: public-d
+  SubnetPublicD:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PublicSubnetDCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}d
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-public-subnet-d
+
+  SubnetRouteTableAssociationPublicD:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPublicD
+      RouteTableId: !Ref RouteTablePublic
+
+  ## NAT Gateway: public-a
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-eip.html
+  EIPNATGatewayA:
+    Condition: ShouldCreateSubnetProtected
+    ## Elastic IP (EIP) アドレスを指定し、オプションでそれを Amazon EC2 インスタンスに関連付けることができます。
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-nat-a
+
+  ## 指定したサブネット内のネットワークアドレス変換（NAT）ゲートウェイを指定します。パブリックNATゲートウェイまたはプライベートNATゲートウェイのいずれかを作成することができます。
+  ## デフォルトはパブリックNATゲートウェイです。パブリックNATゲートウェイを作成する場合は、エラスティックIPアドレスを指定する必要があります。
+  ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-natgateway.html
+  NATGatewayA:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::NatGateway
+    Properties:
+      ## [Public NAT gateway only] NATゲートウェイに関連するElastic IPアドレスの割り当てIDです。
+      ## Required: No
+      ## Amazon VPCで使用するためのアドレスの割り当てを表すために、AWSが割り当てるIDです。これは、VPCエラスティックIPアドレスに対してのみ返されます。
+      AllocationId: !GetAtt EIPNATGatewayA.AllocationId
+      SubnetId: !Ref SubnetPublicA
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-nat-a
+
+  ## Route Table: protected-a
+  RouteTableProtectedA:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-rtb-a
+
+  RouteProtectedADefault:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref RouteTableProtectedA
+
+  ## Route Table: protected-c
+  RouteTableProtectedC:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-rtb-c
+
+  RouteProtectedCDefault:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref RouteTableProtectedC
+
+  ## Route Table: protected-d
+  RouteTableProtectedD:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-rtb-d
+
+  RouteProtectedDDefault:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Route
+    Properties:
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+      RouteTableId: !Ref RouteTableProtectedD
+
+  ## Subnet: protected-a
+  SubnetProtectedA:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, ProtectedSubnetACidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-subnet-a
+
+  SubnetRouteTableAssociationProtectedA:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetProtectedA
+      RouteTableId: !Ref RouteTableProtectedA
+
+  ## Subnet: protected-c
+  SubnetProtectedC:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, ProtectedSubnetCCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}c
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-subnet-c
+
+  SubnetRouteTableAssociationProtectedC:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetProtectedC
+      RouteTableId: !Ref RouteTableProtectedC
+
+  ## Subnet: protected-d
+  SubnetProtectedD:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, ProtectedSubnetDCidrBlock ]
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-protected-subnet-d
+
+  SubnetRouteTableAssociationProtectedD:
+    Condition: ShouldCreateSubnetProtected
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetProtectedD
+      RouteTableId: !Ref RouteTableProtectedD
+
+  ## Route Table: private
+  RouteTablePrivate:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-private-rtb
+
+  ## Subnet: private-a
+  SubnetPrivateA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PrivateSubnetACidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}a
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-private-subnet-a
+
+  SubnetRouteTableAssociationPrivateA:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivateA
+      RouteTableId: !Ref RouteTablePrivate
+
+  ## Subnet: private-c
+  SubnetPrivateC:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PrivateSubnetCCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}c
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-private-subnet-c
+
+  SubnetRouteTableAssociationPrivateC:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivateC
+      RouteTableId: !Ref RouteTablePrivate
+
+  ## Subnet: private-d
+  SubnetPrivateD:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, PrivateSubnetDCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}d
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-private-subnet-d
+
+  SubnetRouteTableAssociationPrivateD:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref SubnetPrivateD
+      RouteTableId: !Ref RouteTablePrivate
+
+  ## VPC Endpoint https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-resource-ec2-vpcendpoint.html
+  ## サービスのVPCエンドポイントを指定します。エンドポイントを使用すると、VPCとサービスの間にプライベート接続を作成することができます。
+  ## ゲートウェイエンドポイントは、Amazon S3またはAmazon DynamoDBを宛先とするトラフィックのルートテーブルのルートのターゲットとして機能します。
+  ## エンドポイントにはエンドポイントポリシーを指定し、VPCからサービスへのアクセスを制御することができます。また、エンドポイントを使用するVPCルートテーブルを指定することができます。
+  VPCEndpointGatewayDynamoDB:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref RouteTablePublic
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedA, !Ref AWS::NoValue ]
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedC, !Ref AWS::NoValue ]
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedD, !Ref AWS::NoValue ]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.dynamodb
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+
+  VPCEndpointGatewayS3:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      RouteTableIds:
+        - !Ref RouteTablePublic
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedA, !Ref AWS::NoValue ]
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedC, !Ref AWS::NoValue ]
+        - !If [ ShouldCreateSubnetProtected, !Ref RouteTableProtectedD, !Ref AWS::NoValue ]
+      ServiceName: !Sub com.amazonaws.${AWS::Region}.s3
+      VpcEndpointType: Gateway
+      VpcId: !Ref VPC
+
+Outputs:
+  ## VPC
+  VPC:
+    Value: !Ref VPC
+    Export:
+      Name: !Sub ${AWS::StackName}-VPC
+
+  ## Internet Gateway
+  InternetGateway:
+    Value: !Ref InternetGateway
+    Export:
+      Name: !Sub ${AWS::StackName}-InternetGateway
+
+  ## Route Table: public
+  RouteTablePublic:
+    Value: !Ref RouteTablePublic
+    Export:
+      Name: !Sub ${AWS::StackName}-RouteTablePublic
+
+  ## Subnet: public
+  SubnetPublicA:
+    Value: !Ref SubnetPublicA
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPublicA
+
+  SubnetPublicC:
+    Value: !Ref SubnetPublicC
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPublicC
+
+  SubnetPublicD:
+    Value: !Ref SubnetPublicD
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPublicD
+
+  NATGatewayA:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref NATGatewayA
+    Export:
+      Name: !Sub ${AWS::StackName}-NATGatewayA
+
+  ## Route Table: protected
+  RouteTableProtectedA:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref RouteTableProtectedA
+    Export:
+      Name: !Sub ${AWS::StackName}-RouteTableProtectedA
+
+  RouteTableProtectedC:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref RouteTableProtectedC
+    Export:
+      Name: !Sub ${AWS::StackName}-RouteTableProtectedC
+
+  RouteTableProtectedD:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref RouteTableProtectedD
+    Export:
+      Name: !Sub ${AWS::StackName}-RouteTableProtectedD
+
+  ## Subnet: protected
+  SubnetProtectedA:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref SubnetProtectedA
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetProtectedA
+
+  SubnetProtectedC:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref SubnetProtectedC
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetProtectedC
+
+  SubnetProtectedD:
+    Condition: ShouldCreateSubnetProtected
+    Value: !Ref SubnetProtectedD
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetProtectedD
+
+  ## Route Table: private
+  RouteTablePrivate:
+    Value: !Ref RouteTablePrivate
+    Export:
+      Name: !Sub ${AWS::StackName}-RouteTablePrivate
+
+  ## Subnet: private
+  SubnetPrivateA:
+    Value: !Ref SubnetPrivateA
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPrivateA
+
+  SubnetPrivateC:
+    Value: !Ref SubnetPrivateC
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPrivateC
+
+  SubnetPrivateD:
+    Value: !Ref SubnetPrivateD
+    Export:
+      Name: !Sub ${AWS::StackName}-SubnetPrivateD
+
+  ## VPC Endpoint
+  VPCEndpointGatewayDynamoDB:
+    Value: !Ref VPCEndpointGatewayDynamoDB
+    Export:
+      Name: !Sub ${AWS::StackName}-VPCEndpointGatewayDynamoDB
+
+  VPCEndpointGatewayS3:
+    Value: !Ref VPCEndpointGatewayS3
+    Export:
+      Name: !Sub ${AWS::StackName}-VPCEndpointGatewayS3

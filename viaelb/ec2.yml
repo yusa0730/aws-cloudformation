@@ -1,0 +1,332 @@
+---
+### [Change System Name] ishizawa-aws-test
+### ImportValue: rds, vpc, elb, route53
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create EC2 Instance etc.
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  SubDomain:
+    Description: Sub Domain
+    Type: String
+    Default: elb
+    AllowedPattern: ^[^.]*$
+  ResourceName:
+    Description: Resource Name
+    Type: String
+    Default: viaelb
+  EC2ImageId:
+    Description: >
+      Specifies the AMI ID for your instances.
+      https://aws.amazon.com/jp/blogs/news/query-for-the-latest-amazon-linux-ami-ids-using-aws-systems-manager-parameter-store/
+      e.g. amzn2-ami-hvm-2.0.20201218.1-x86_64-gp2
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-gp2
+  ELBListenerRulePriority:
+    Description: ELB Listner Rule Priority
+    Type: Number
+    Default: 21
+    MinValue: 1
+    MaxValue: 50000
+  UseSubnetProtected:
+    Description: Use Protected Subnet
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - SubDomain
+          - ResourceName
+          - EC2ImageId
+          - UseSubnetProtected
+
+Conditions:
+  ShouldUseSubnetProtected: !Equals [ !Ref UseSubnetProtected, true ]
+
+Resources:
+  ## IAM: Role
+  IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ## ロールにアタッチしたいIAMマネージドポリシーのAmazonリソース名（ARN）のリストです。
+      ## AWSが作ったポリシーをアタッチ
+      ManagedPolicyArns:
+        ## To push images to ECR
+        - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
+        ## To use Session Manager
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        ## To get secret value from Secrets Manager
+        - !ImportValue iam-role-SecretsManagerGetSecretValuePolicy
+
+  ## IAM: Instance Profile
+  IAMInstanceProfile:
+    ## AWS Management Console を使用して Amazon EC2 のロールを作成する場合、コンソールはインスタンスプロファイルを自動的に作成し、そのインスタンスプロファイルにロールと同じ名前を付けます。
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: !Ref IAMRole
+      Roles:
+        - !Ref IAMRole
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+      GroupDescription: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+
+  ## EC2(VPC): Security Group Inbound Rule From ELB (HTTP)
+  EC2SecurityGroupIngressHttpFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-elb-EC2SecurityGroup
+      Description: !Sub ${SystemName}-${Environment}-alb-sg
+
+  ## EC2(VPC): Security Group Inbound Rule To RDS (MySQL)
+  EC2SecurityGroupIngressMySQLToRDS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-DBClusterEndpointPort
+      ToPort:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-DBClusterEndpointPort
+      SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Description: !Sub ${SystemName}-${Environment}-${ResourceName}-ec2-sg
+
+  ## EC2: Instance
+  Instance:
+    ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-ec2-instance.html
+    Type: AWS::EC2::Instance
+    ## To retain the instance to be replaced when updating the instance
+    UpdateReplacePolicy: Retain
+    Properties:
+      ImageId: !Ref EC2ImageId
+      InstanceType: t2.micro
+      ## IAMインスタンスプロファイルの名前です。新しいIAMインスタンスプロファイルを作成するには、AWS::IAM::InstanceProfileリソースを使用します。
+      IamInstanceProfile: !Ref IAMInstanceProfile
+      ## インスタンス起動時に既存のネットワークインターフェースをアタッチすることも可能です。
+      ## インスタンスにアタッチするネットワーク・インターフェイスを指定します。
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          Description: Primary network inteface
+          AssociatePublicIpAddress: !If [ ShouldUseSubnetProtected, false, true ]
+          GroupSet:
+            - !Ref EC2SecurityGroup
+          SubnetId:
+            Fn::If:
+              - ShouldUseSubnetProtected
+              - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetProtectedC
+              - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
+      Monitoring: false
+      ## インスタンスで利用できるようにするためのユーザーデータスクリプト。詳細については、起動時にLinuxインスタンスでコマンドを実行する、コマンドラインツールを使用している場合、base64エンコードが実行され、ファイルからテキストを読み込むことができます。
+      ## それ以外の場合は、base64エンコードされたテキストを提供する必要があります。ユーザーデータは16KBに制限されています。
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          yum -y update
+          aws configure set default.region ${AWS::Region}
+          amazon-linux-extras install docker -y
+          systemctl enable docker.service
+          systemctl start docker.service
+          curl -L "https://github.com/docker/compose/releases/download/1.27.4/docker-compose-$(uname -s)-$(uname -m)" -o /usr/local/bin/docker-compose
+          chmod +x /usr/local/bin/docker-compose
+          ln -s /usr/local/bin/docker-compose /usr/bin/docker-compose
+          docker run --name nginx --restart=always -d -p 80:80 nginx
+      ## To change the volume type from gp2 to gp3
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            DeleteOnTermination: true
+            Encrypted: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}
+
+
+  ## ELB: Target Group
+  ELBTargetGroup:
+    ## ロードバランサーのターゲットグループを指定します。
+    ## ターゲットグループのプロトコルがTCP、TLS、UDP、TCP_UDPの場合、ヘルスチェックのプロトコル、間隔、タイムアウト、成功コードを変更することはできません。
+    ## Lambda関数をターゲットとして登録する前に、Elastic Load BalancingサービスプリンシパルにLambda関数を呼び出す許可を与えるAWS::Lambda::Permissionリソースを作成する必要があります。
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${SystemName}-${Environment}-${ResourceName}-tg
+      TargetType: instance
+      Protocol: HTTP
+      Port: 80
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      ## ヘルスチェックが有効かどうかを示す。ターゲットタイプが lambda の場合、ヘルスチェックはデフォルトで無効ですが、有効にすることができます。ターゲットタイプがinstance、ip、albの場合、ヘルスチェックは常に有効であり、無効にすることはできません。
+      HealthCheckEnabled: true
+      ## ロードバランサーがターゲットに対してヘルスチェックを行うときに使用するプロトコルを指定します。アプリケーションロードバランサーの場合、デフォルトはHTTPです。ネットワークロードバランサーとゲートウェイロードバランサーの場合、デフォルトはTCPです。
+      HealthCheckProtocol: HTTP
+      ## [HTTP/HTTPS ヘルスチェック] ターゲットのヘルスチェックの送信先です。
+      ## [HTTP1 or HTTP2 protocol version] pingのパス。デフォルトは / です。
+      HealthCheckPath: /
+      ## 不健全な対象を健常と判断するまでに必要な連続した健全性チェックの成功回数。プロトコルがHTTPまたはHTTPSのターゲットグループの場合、デフォルトは5。
+      HealthyThresholdCount: 5
+      UnhealthyThresholdCount: 2
+      HealthCheckTimeoutSeconds: 5
+      HealthCheckIntervalSeconds: 30
+      ## [HTTP/HTTPS ヘルスチェック] ターゲットからの正常なレスポンスを確認する際に使用する HTTP または gRPC コード。
+      Matcher:
+        HttpCode: "200,301"
+      #  TargetGroupAttributes:
+      #    - Key: stickiness.enabled
+      #      Value: true
+      #    - Key: stickiness.lb_cookie.duration_seconds
+      #      Value: 3600
+      Targets:
+        - Id: !Ref Instance
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-tg
+
+  ## ELB: Listener Rule
+  ELBListenerRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-elb-ListenerHttps
+      Priority: !Ref ELBListenerRulePriority
+      Conditions:
+        - Field: host-header
+          HostHeaderConfig:
+            Values:
+              - !Sub
+                - "${SubDomain}.${DomainName}"
+                - DomainName:
+                    Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+        - Field: path-pattern
+          PathPatternConfig:
+            Values:
+              - /*
+      Actions:
+        - Type: forward
+          ForwardConfig:
+            TargetGroups:
+              - TargetGroupArn: !Ref ELBTargetGroup
+
+Outputs:
+  ## IAM: Role
+  IAMRole:
+    Value: !Ref IAMRole
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRole
+
+  IAMRoleArn:
+    Value: !GetAtt IAMRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMRoleArn
+
+   ## IAM: Instance Profile
+  IAMInstanceProfile:
+    Value: !Ref IAMInstanceProfile
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfile
+
+  IAMInstanceProfileArn:
+    Value: !GetAtt IAMInstanceProfile.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-IAMInstanceProfileArn
+
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroup
+
+  EC2SecurityGroupVpcId:
+    Value: !GetAtt EC2SecurityGroup.VpcId
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroupVpcId
+
+  ## EC2: Instance
+  Instance:
+    Value: !Ref Instance
+    Export:
+      Name: !Sub ${AWS::StackName}-Instance
+
+  InstanceAvailabilityZone:
+    Value: !GetAtt Instance.AvailabilityZone
+    Export:
+      Name: !Sub ${AWS::StackName}-InstanceAvailabilityZone
+
+  InstancePrivateDnsName:
+    Value: !GetAtt Instance.PrivateDnsName
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateDnsName
+
+  InstancePrivateIp:
+    Value: !GetAtt Instance.PrivateIp
+    Export:
+      Name: !Sub ${AWS::StackName}-InstancePrivateIp
+
+  ## ELB: Target Group
+  ELBTargetGroup:
+    Value: !Ref ELBTargetGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBTargetGroup
+
+  ELBTargetGroupLoadBalancerArns1:
+    Value: !Select [ 0, !GetAtt ELBTargetGroup.LoadBalancerArns ]
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBTargetGroupLoadBalancerArns1
+
+  ELBTargetGroupFullName:
+    Value: !GetAtt ELBTargetGroup.TargetGroupFullName
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBTargetGroupFullName
+
+  ELBTargetGroupName:
+    Value: !GetAtt ELBTargetGroup.TargetGroupName
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBTargetGroupName
+
+  ## ELB: Listener Rule
+  ELBListenerRule:
+    Value: !Ref ELBListenerRule
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBListenerRule

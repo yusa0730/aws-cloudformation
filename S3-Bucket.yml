@@ -1,0 +1,26 @@
+---
+AWSTemplateFormatVersion: "2010-09-09"
+Parameters:
+  SystemName:
+    Type: String
+    Default: "ishizawa-aws-test"
+    Description: "BaseName for this stack."
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+
+Resources:
+  S3BucketSSMOutputs:
+    Type: "AWS::S3::Bucket"
+    Properties:
+      BucketName: !Sub "${SystemName}-ssm-outputs"
+      VersioningConfiguration:
+        Status: "Enabled"
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-ssm-s3-bucket
