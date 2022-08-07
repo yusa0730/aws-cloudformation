@@ -63,6 +63,7 @@ Resources:
         Statement:
           - Effect: Allow
             Action: s3:PutObject
+            ## 誰が誰に対して
             Principal:
               ## The account ID for ELB log output is fixed: 582318560864
               ## Bucket Permissions - Access Logs for Your Application Load Balancer - Elastic Load Balancing
@@ -71,6 +72,7 @@ Resources:
             Resource: !Sub ${S3BucketAccessLogs.Arn}/AWSLogs/${AWS::AccountId}/*
 
   ## EC2(VPC): Security Group
+  ## ネットワークを制限する役割
   EC2SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -90,16 +92,20 @@ Resources:
       IpProtocol: tcp
       FromPort: 80
       ToPort: 80
+      ## 全てのIPV4アドレスを指している
       CidrIp: 0.0.0.0/0
       Description: any
 
   ## EC2(VPC): Security Group Inbound Rule From Any (HTTPS)
+  ## 管理画面で書いてあるportは宛先のポート番号
   EC2SecurityGroupIngressHttps:
     Type: AWS::EC2::SecurityGroupIngress
     Properties:
       GroupId: !Ref EC2SecurityGroup
       IpProtocol: tcp
+      ## 送信元
       FromPort: 443
+      ## 宛先
       ToPort: 443
       CidrIp: 0.0.0.0/0
       Description: any
@@ -111,11 +117,14 @@ Resources:
       Name: !Sub ${SystemName}-${Environment}-alb
       IpAddressType: ipv4
       Type: application
+      ## 冗長化のためにAZは三つ選んだ方が良い
       Subnets:
         - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicA
         - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
         - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicD
+      ## https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-properties-elasticloadbalancingv2-loadbalancer-loadbalancerattributes.html
       LoadBalancerAttributes:
+        ## S3へのアクセスログ出力を有効化
         - Key: access_logs.s3.enabled
           Value: true
         - Key: access_logs.s3.bucket
@@ -176,7 +185,7 @@ Resources:
     Type: AWS::ElasticLoadBalancingV2::ListenerRule
     Properties:
       ListenerArn: !Ref ListenerHttps
-      Priority: 11
+      Priority: 11 ## 1~50000までの数値で決まる
       Conditions:
         - Field: host-header
           HostHeaderConfig:
@@ -237,9 +246,10 @@ Resources:
           - DomainName:
               Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
       Type: A
+      ## dualstackはipv6のためのELBエンドポイントを可能にするもの
       AliasTarget:
-        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID
-        DNSName: !Sub dualstack.${LoadBalancer.DNSName}
+        HostedZoneId: !GetAtt LoadBalancer.CanonicalHostedZoneID ## CanonicalHostedZoneIDはロードバランサーに関連付けられたAmazon Route 53のホストゾーンのID
+        DNSName: !Sub dualstack.${LoadBalancer.DNSName} ## ALIAS(CNAMEっぽいAレコード)レコードの値となるDNSName
 
 Outputs:
   ## S3: Access Logs

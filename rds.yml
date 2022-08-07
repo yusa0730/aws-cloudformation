@@ -8,7 +8,7 @@ Mappings:
   EnvironmentMap:
     prod:
       DBInstanceClass: db.t3.small
-      CreateDBInstanceC: true
+      CreateDBInstanceC: false
       CreateDBInstanceD: false
       EnhancedMonitoring: true
       BackupRetentionPeriod: 3
@@ -250,6 +250,7 @@ Resources:
       TargetId: !Ref DBCluster
       TargetType: AWS::RDS::DBCluster
 
+  ## ⑧のAMIで利用するd
   SecretTargetAttachmentAwsmaster:
     Type: AWS::SecretsManager::SecretTargetAttachment
     Properties:

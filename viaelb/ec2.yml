@@ -83,10 +83,12 @@ Resources:
         - arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryPowerUser
         ## To use Session Manager
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
-        ## To get secret value from Secrets Manager
+        ## To get secret value from Secrets Manager。 AMI
         - !ImportValue iam-role-SecretsManagerGetSecretValuePolicy
 
   ## IAM: Instance Profile
+  ## Instance profile ARN arn:aws:iam::218317313594:instance-profile/ishizawa-aws-test-prod-viaelb-ec2-role
+  ## EC2インスタンスにIAMRoleをくっつける役割 IAMRoleは直接EC2インスタンスにつけられない
   IAMInstanceProfile:
     ## AWS Management Console を使用して Amazon EC2 のロールを作成する場合、コンソールはインスタンスプロファイルを自動的に作成し、そのインスタンスプロファイルにロールと同じ名前を付けます。
     Type: AWS::IAM::InstanceProfile
