@@ -351,6 +351,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: !FindInMap [ EnvironmentMap, !Ref Environment, ProtectedSubnetDCidrBlock ]
+      AvailabilityZone: !Sub ${AWS::Region}d
       Tags:
         - Key: Name
           Value: !Sub ${SystemName}-${Environment}-protected-subnet-d

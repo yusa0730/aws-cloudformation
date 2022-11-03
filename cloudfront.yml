@@ -1,0 +1,507 @@
+---
+### [Change Acm Certificate Arn] arn:aws:acm:us-east-1:[xxxxxxxxxxxx]:certificate/[xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+### [Change System Name] awsmaster
+### ImportValue: route53, elb
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create CloudFront, S3 etc.
+
+Mappings:
+  EnvironmentMap:
+    prod:
+      ### [Change Acm Certificate Arn] CloudFront certificate needs to be created in the us-east-1 region.
+      AcmCertificateArn: arn:aws:acm:us-east-1:218317313594:certificate/a43ee596-b547-491f-88e6-604deb5b2ea1
+      ## CloudFront WebACL needs to be created in the us-east-1 region.
+      # WebACLArn: arn:aws:wafv2:us-east-1:[xxxxxxxxxxxx]:global/webacl/awsmaster-prod-webacl/[xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+    stg:
+      AcmCertificateArn: arn:aws:acm:us-east-1:218317313594:certificate/a43ee596-b547-491f-88e6-604deb5b2ea1
+      # WebACLArn: arn:aws:wafv2:us-east-1:[xxxxxxxxxxxx]:global/webacl/awsmaster-stg-webacl/[xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+    dev:
+      AcmCertificateArn: arn:aws:acm:us-east-1:218317313594:certificate/a43ee596-b547-491f-88e6-604deb5b2ea1
+      # WebACLArn: arn:aws:wafv2:us-east-1:[xxxxxxxxxxxx]:global/webacl/awsmaster-dev-webacl/[xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx]
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test ### [Change System Name]
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  SubDomain:
+    Description: Sub Domain
+    Type: String
+    Default: cdn
+    AllowedPattern: ^[^.]*$
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - SubDomain
+
+Resources:
+  ## Secrets Manager: Secret (x-via-cloudfront)
+  ## If the request has an x-via-cloudfront header, ELB can be authenticated as a request via CloudFront.
+  ## The Secret is not named, because it takes at least 7 days to delete.
+  SecretForCloudFront:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Description: !Sub Secret for CloudFront (${AWS::StackName})
+      GenerateSecretString:
+        SecretStringTemplate: "{}"
+        GenerateStringKey: x-via-cloudfront
+        ExcludePunctuation: true
+        PasswordLength: 128
+
+  ## S3: Access Logs
+  S3BucketAccessLogs:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SystemName}-${Environment}-cloudfront-accesslogs-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: ObjectWriter
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ## S3: Redirections
+  S3BucketRedirections:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SystemName}-${Environment}-cloudfront-redirections-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      ## Static website hosting
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        RoutingRules:
+          - RoutingRuleCondition:
+              KeyPrefixEquals: favicon.ico
+            RedirectRule:
+              HostName: !Sub
+                 - "${SubDomain}.${DomainName}"
+                 - DomainName:
+                     Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+              HttpRedirectCode: "302"
+              Protocol: https
+              ReplaceKeyWith: images/favicon.ico
+          - RedirectRule:
+              HostName: !Sub
+                 - "${SubDomain}.${DomainName}"
+                 - DomainName:
+                     Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+              HttpRedirectCode: "301"
+              Protocol: https
+              ReplaceKeyPrefixWith: users/
+
+  ## S3: Static Contents
+  S3BucketStaticContents:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${SystemName}-${Environment}-cloudfront-staticcontents-${AWS::AccountId}
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      OwnershipControls:
+        Rules:
+          - ObjectOwnership: BucketOwnerEnforced
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  S3BucketPolicyStaticContents:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref S3BucketStaticContents
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: s3:ListBucket
+            Principal:
+              AWS: !Sub arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${OriginAccessIdentityStaticContents}
+            Resource: !Sub ${S3BucketStaticContents.Arn}
+          - Effect: Allow
+            Action: s3:GetObject
+            Principal:
+              AWS: !Sub arn:aws:iam::cloudfront:user/CloudFront Origin Access Identity ${OriginAccessIdentityStaticContents}
+            Resource: !Sub ${S3BucketStaticContents.Arn}/*
+
+  ## CloudFront: OriginAccessIdentity
+  OriginAccessIdentityStaticContents:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: !GetAtt S3BucketStaticContents.DomainName
+
+  ## CloudFront: Distribution
+  Distribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        ## Use North America, Europe, Asia, Middle East, and Africa
+        PriceClass: PriceClass_200
+        # WebACLId: !FindInMap [ EnvironmentMap, !Ref Environment, WebACLArn ]
+        Aliases:
+          - !Sub
+            - "${SubDomain}.${DomainName}"
+            - DomainName:
+                Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+        ViewerCertificate:
+          AcmCertificateArn: !FindInMap [ EnvironmentMap, !Ref Environment, AcmCertificateArn ]
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+        HttpVersion: http2and3
+        Logging:
+          Bucket: !GetAtt S3BucketAccessLogs.DomainName
+          Prefix: logs/
+          IncludeCookies: true
+        IPV6Enabled: true
+        Comment: !Sub ${SystemName}-${Environment}-cloudfront
+        Enabled: true
+        Origins:
+          ## ELB
+          - DomainName:
+              Fn::ImportValue: !Sub ${SystemName}-${Environment}-elb-LoadBalancerDNSName
+            Id: !Sub ELB-${SystemName}-${Environment}-alb
+            CustomOriginConfig:
+              OriginSSLProtocols:
+                - TLSv1.2
+              OriginProtocolPolicy: https-only
+              OriginReadTimeout: 60
+              OriginKeepaliveTimeout: 5
+              HTTPSPort: 443
+            OriginCustomHeaders:
+              - HeaderName: x-via-cloudfront
+                HeaderValue: !Sub "{{resolve:secretsmanager:${SecretForCloudFront}:SecretString:x-via-cloudfront}}"
+          ## S3: Static Contents
+          - DomainName: !GetAtt S3BucketStaticContents.RegionalDomainName
+            Id: !Sub S3-${S3BucketStaticContents}
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${OriginAccessIdentityStaticContents}
+          ## S3 Website: Redirections
+          - DomainName: !Select [ 1, !Split [ "://", !GetAtt S3BucketRedirections.WebsiteURL ] ]
+            Id: !Sub S3-Website-${S3BucketRedirections}
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+              OriginReadTimeout: 30
+              OriginKeepaliveTimeout: 5
+              HTTPPort: 80
+        DefaultCacheBehavior:
+          ## ELB
+          TargetOriginId: !Sub ELB-${SystemName}-${Environment}-alb
+          Compress: true
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+          CachedMethods:
+            - GET
+            - HEAD
+          ## Ref. https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-cache-policies.html
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+          ## Ref. https://docs.aws.amazon.com/AmazonCloudFront/latest/DeveloperGuide/using-managed-origin-request-policies.html
+          OriginRequestPolicyId: 216adef6-5c7f-47e4-b989-5492eafa07d3 ## Managed-AllViewer
+        CacheBehaviors:
+          ## S3 Website: Redirections
+          - PathPattern: /favicon.ico
+            TargetOriginId: !Sub S3-Website-${S3BucketRedirections}
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf ## Managed-CORS-S3Origin
+          - PathPattern: /
+            TargetOriginId: !Sub S3-Website-${S3BucketRedirections}
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf ## Managed-CORS-S3Origin
+          ## S3: Static Contents
+          - PathPattern: /css/*
+            TargetOriginId: !Sub S3-${S3BucketStaticContents}
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf ## Managed-CORS-S3Origin
+          - PathPattern: /images/*
+            TargetOriginId: !Sub S3-${S3BucketStaticContents}
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf ## Managed-CORS-S3Origin
+          - PathPattern: /js/*
+            TargetOriginId: !Sub S3-${S3BucketStaticContents}
+            Compress: true
+            ViewerProtocolPolicy: redirect-to-https
+            AllowedMethods:
+              - GET
+              - HEAD
+            CachedMethods:
+              - GET
+              - HEAD
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad ## Managed-CachingDisabled
+            OriginRequestPolicyId: 88a5eaf4-2fd4-4709-b370-b4c650ea3fcf ## Managed-CORS-S3Origin
+
+  ## ELB: Listener Rule (404 Not Found)
+  ELBListenerRuleNotFound:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-elb-ListenerHttps
+      Priority: 200
+      Conditions:
+        - Field: http-header
+          HttpHeaderConfig:
+            HttpHeaderName: x-via-cloudfront
+            Values:
+              - !Sub "{{resolve:secretsmanager:${SecretForCloudFront}:SecretString:x-via-cloudfront}}"
+      Actions:
+        - Type: fixed-response
+          FixedResponseConfig:
+            StatusCode: "404"
+            ContentType: text/html
+            MessageBody: |
+              <html>
+              <head>
+              <title>404 Not Found</title>
+              <link rel="icon" href="/images/favicon.ico">
+              </head>
+              <body>
+              <center><h1>404 Not Found</h1></center>
+              </body>
+              </html>
+
+  ## Route53: RecordSet (IPv4)
+  Route53RecordSetIPv4:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZone
+      Name: !Sub
+          - "${SubDomain}.${DomainName}."
+          - DomainName:
+              Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Type: A
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+  ## Route53: RecordSet (IPv6)
+  Route53RecordSetIPv6:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZone
+      Name: !Sub
+          - "${SubDomain}.${DomainName}."
+          - DomainName:
+              Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+      Type: AAAA
+      AliasTarget:
+        HostedZoneId: Z2FDTNDATAQYW2
+        DNSName: !GetAtt Distribution.DomainName
+
+Outputs:
+  ## Secrets Manager: Secret (x-via-cloudfront)
+  SecretForCloudFront:
+    Value: !Ref SecretForCloudFront
+    Export:
+      Name: !Sub ${AWS::StackName}-SecretForCloudFront
+
+  ## S3: Access Logs
+  S3BucketAccessLogs:
+    Value: !Ref S3BucketAccessLogs
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogs
+
+  S3BucketAccessLogsArn:
+    Value: !GetAtt S3BucketAccessLogs.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsArn
+
+  S3BucketAccessLogsDomainName:
+    Value: !GetAtt S3BucketAccessLogs.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsDomainName
+
+  S3BucketAccessLogsDualStackDomainName:
+    Value: !GetAtt S3BucketAccessLogs.DualStackDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsDualStackDomainName
+
+  S3BucketAccessLogsRegionalDomainName:
+    Value: !GetAtt S3BucketAccessLogs.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsRegionalDomainName
+
+  S3BucketAccessLogsWebsiteURL:
+    Value: !GetAtt S3BucketAccessLogs.WebsiteURL
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketAccessLogsWebsiteURL
+
+  ## S3: Redirections
+  S3BucketRedirections:
+    Value: !Ref S3BucketRedirections
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirections
+
+  S3BucketRedirectionsArn:
+    Value: !GetAtt S3BucketRedirections.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirectionsArn
+
+  S3BucketRedirectionsDomainName:
+    Value: !GetAtt S3BucketRedirections.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirectionsDomainName
+
+  S3BucketRedirectionsDualStackDomainName:
+    Value: !GetAtt S3BucketRedirections.DualStackDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirectionsDualStackDomainName
+
+  S3BucketRedirectionsRegionalDomainName:
+    Value: !GetAtt S3BucketRedirections.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirectionsRegionalDomainName
+
+  S3BucketRedirectionsWebsiteURL:
+    Value: !GetAtt S3BucketRedirections.WebsiteURL
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketRedirectionsWebsiteURL
+
+  ## S3: Static Contents
+  S3BucketStaticContents:
+    Value: !Ref S3BucketStaticContents
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContents
+
+  S3BucketStaticContentsArn:
+    Value: !GetAtt S3BucketStaticContents.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContentsArn
+
+  S3BucketStaticContentsDomainName:
+    Value: !GetAtt S3BucketStaticContents.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContentsDomainName
+
+  S3BucketStaticContentsDualStackDomainName:
+    Value: !GetAtt S3BucketStaticContents.DualStackDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContentsDualStackDomainName
+
+  S3BucketStaticContentsRegionalDomainName:
+    Value: !GetAtt S3BucketStaticContents.RegionalDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContentsRegionalDomainName
+
+  S3BucketStaticContentsWebsiteURL:
+    Value: !GetAtt S3BucketStaticContents.WebsiteURL
+    Export:
+      Name: !Sub ${AWS::StackName}-S3BucketStaticContentsWebsiteURL
+
+  ## CloudFront: OriginAccessIdentity
+  OriginAccessIdentityStaticContents:
+    Value: !Ref OriginAccessIdentityStaticContents
+    Export:
+      Name: !Sub ${AWS::StackName}-OriginAccessIdentityStaticContents
+
+  OriginAccessIdentityStaticContentsS3CanonicalUserId:
+    Value: !GetAtt OriginAccessIdentityStaticContents.S3CanonicalUserId
+    Export:
+      Name: !Sub ${AWS::StackName}-OriginAccessIdentityStaticContentsS3CanonicalUserId
+
+  ## CloudFront: Distribution
+  Distribution:
+    Value: !Ref Distribution
+    Export:
+      Name: !Sub ${AWS::StackName}-Distribution
+
+  DistributionDomainName:
+    Value: !GetAtt Distribution.DomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-DistributionDomainName
+
+  DistributionAlternateDomainName:
+    Value:
+      Fn::ImportValue:
+        !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
+    Export:
+      Name: !Sub ${AWS::StackName}-DistributionAlternateDomainName
+
+  ## ELB: Listener Rule (404 Not Found)
+  ELBListenerRuleNotFound:
+    Value: !Ref ELBListenerRuleNotFound
+    Export:
+      Name: !Sub ${AWS::StackName}-ELBListenerRuleNotFound
+
+  ## Route53: RecordSet (IPv4)
+  Route53RecordSetIPv4:
+    Value: !Ref Route53RecordSetIPv4
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53RecordSetIPv4
+
+  ## Route53: RecordSet (IPv6)
+  Route53RecordSetIPv6:
+    Value: !Ref Route53RecordSetIPv6
+    Export:
+      Name: !Sub ${AWS::StackName}-Route53RecordSetIPv6
