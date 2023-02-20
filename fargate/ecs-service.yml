@@ -1,8 +1,8 @@
 ---
 ### [Change System Name] ishizawa-aws-test
-### ImportValue: cloudfront, vpc, elb, iam-role, ecr, rds, route53, ecs-cluster
+### ImportValue: vpc, elb, rds, cloudfront, iam-role, ecr, route53, ecs-cluster
 AWSTemplateFormatVersion: "2010-09-09"
-Description: Create IAM Policy, IAM Role, SSM Parameter, ELB TargetGroup, ELB ListenerRule, ECS TaskDefinition and ECS Service (EC2) etc.
+Description: Create EC2 Security Group, IAM Policy, IAM Role, SSM Parameter, ELB TargetGroup, ELB ListenerRule, ECS TaskDefinition and ECS Service (Fargate) etc.
 
 Mappings:
   EnvironmentMap:
@@ -29,13 +29,21 @@ Parameters:
   ResourceName:
     Description: Resource Name
     Type: String
-    Default: viacdn
+    Default: fg
+  ## 前回に比べて優先度を上げている
   ELBListenerRulePriority:
     Description: ELB Listner Rule Priority
     Type: Number
-    Default: 121
+    Default: 111
     MinValue: 1
     MaxValue: 50000
+  UseSubnetProtected:
+    Description: Use Protected Subnet
+    Type: String
+    Default: true
+    AllowedValues:
+      - true
+      - false
 
 Metadata:
   AWS::CloudFormation::Interface:
@@ -47,13 +55,59 @@ Metadata:
           - Environment
           - ResourceName
           - ELBListenerRulePriority
+          - UseSubnetProtected
+
+Conditions:
+  # isProd: !Equals [ !Ref Environment, prod ]
+  ShouldUseSubnetProtected: !Equals [ !Ref UseSubnetProtected, true ]
 
 Resources:
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task-sg
+      GroupDescription: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task-sg
+      VpcId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task-sg
+
+  ## EC2(VPC): Security Group Inbound Rule From ELB (HTTP)
+  EC2SecurityGroupIngressHttpFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort: 80
+      ToPort: 80
+      SourceSecurityGroupId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-elb-EC2SecurityGroup
+      Description: !Sub ${SystemName}-${Environment}-alb-sg
+
+  ## EC2(VPC): Security Group Inbound Rule To RDS (MySQL)
+  ## そのリソースが何のために必要なのか？RDSのスタックでも記述できるけど、RDSのファイルも変更しないといけないしスタックを削除する時にスムーズに消すことができないのでここに記載している
+  EC2SecurityGroupIngressMySQLToRDS:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-EC2SecurityGroup
+      IpProtocol: tcp
+      FromPort:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-DBClusterEndpointPort
+      ToPort:
+        Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-DBClusterEndpointPort
+      SourceSecurityGroupId: !Ref EC2SecurityGroup
+      Description: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task-sg
+
   ## IAM: Role
+  ## 今回はECS Task自体に付けるIAM Role。前回はEC2インスタンスに付けていた
   IAMRole:
     Type: AWS::IAM::Role
     Properties:
       RoleName: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task-role
+      ## ecsタスクにお面を被せることを許可する
       AssumeRolePolicyDocument:
         Version: "2012-10-17"
         Statement:
@@ -61,9 +115,11 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
+      ## 他のリソースでも使い回したい汎用的なポリシー
       ManagedPolicyArns:
         ## To use ECS Exec
         - !ImportValue iam-role-AmazonECSExecuteCommandPolicy
+      ## インラインポリシー。このロールでしか利用しないポリシー
       Policies:
         - PolicyName: AmazonS3StaticContentsManipulateObjectPolicy
           PolicyDocument:
@@ -81,41 +137,29 @@ Resources:
                         Fn::ImportValue: !Sub ${SystemName}-${Environment}-cloudfront-S3BucketStaticContentsArn
 
   ## ELB: Target Group
+  ## 今までは全てinstanceが振り分け対象（ターゲット）だったが、今回はipが振り分け対象となる
   ELBTargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     Properties:
       Name: !Sub ${SystemName}-${Environment}-${ResourceName}-tg
-      ## ターゲットをインスタンスIDで登録する。デフォルトはinstance。他にip(ターゲットをipアドレスで登録)やlambda、albをターゲットで指定できる
-      TargetType: instance
+      TargetType: ip
       Protocol: HTTP
       Port: 80
       VpcId:
         Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-VPC
       HealthCheckEnabled: true
       HealthCheckProtocol: HTTP
-      HealthCheckPath: /
-      ## ロードバランサーがターゲットのヘルスチェックを行う際に使用するポート
-      ## プロトコルがHTTP、HTTPS、TCP、TLS、UDP、TCP_UDPの場合、デフォルトはtraffic-portになる。これは各ターゲットがロードバランサーからトラフィックを受信するポート
+      HealthCheckPath: /users/
       HealthCheckPort: traffic-port
-      ## ヘルスチェックの連続成功回数の設定値
       HealthyThresholdCount: 5
-      ## ターゲットが不健康であると判断するまでに必要なヘルスチェックの連続失敗回数
       UnhealthyThresholdCount: 2
-      ## ヘルスチェックを失敗したとみなす、ターゲットからレスポンスが無い時間
       HealthCheckTimeoutSeconds: 5
-      ## この場合30秒ごとにHTTPプロトコルでpath「/」にリクエストを投げて5回連続で正常だったらstatus200
       HealthCheckIntervalSeconds: 30
-      ## 成功コード
       Matcher:
-        ## 301はHTTPでリクエストが来たときにHTTPSにリダイレクトするためのステータス
         HttpCode: "200,301"
-      # TargetGroupAttributes
-      ## スティッキーセッション機能を使用して、ロードバランサーがユーザーのセッションを特定のターゲットにバインドするように設定する。cookieに固定したターゲットの割り振り先を設定して同じターゲットにアクセスさせるようにする設定
-      ## ロードバランサーがユーザーのリクエストを同じターゲットに一貫してルーティングする期間の設定が重要
-      ## スティッキーセッションを使用しないでセッション管理を行うためには->Redis、ElastiCacheを利用してセッションストアをEC2インスタンスの外に保持するようにする。
+      # TargetGroupAttributes:
       #   - Key: stickiness.enabled
       #     Value: true
-      ## クライアントからの要求が同じターゲットにルーティングされる時間(秒)。この期間が過ぎると、ロードバランサーによって生成されたクッキーは古いとみなされる
       #   - Key: stickiness.lb_cookie.duration_seconds
       #     Value: 3600
       Tags:
@@ -149,7 +193,6 @@ Resources:
               - TargetGroupArn: !Ref ELBTargetGroup
 
   ## Logs: LogGroup
-  ## CloudWatch Logs
   LogsLogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
@@ -165,27 +208,25 @@ Resources:
       Value: development
 
   ## ECS: Task Definition
-  ## ECSタスクを作成するためのテンプレート。タスクのcpuやmemory、どのリポジトリのイメージを利用するかなどを設定するもの
-  ## ECSタスクとコンテナに割り当てるリソースやIAMロール、CloudWatch Logsの出力先などを指定
-  ## ECSタスクとはDockerコンテナをまとめたもの。Dockerコンテナのセット
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     Properties:
-      ## タスク定義の名前
       Family: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-task
-      ## 起動タイプの設定 (EC2、FARGATE、EXTERNAL)
+      ## 新しい
       RequiresCompatibilities:
-        - EC2
+        - FARGATE
       ## タスク自体(コンテナ)に対するIAMRoleの付与。ECSタスクからLambdaを呼び出したいとき->Lambdaの実行権限をここに設定。
       TaskRoleArn: !GetAtt IAMRole.Arn
-      ## ECSタスクがbridgeモードのためランダムポートになる
-      ## 仮想ネットワークブリッジを使用して、ホストとコンテナーのネットワークの間にレイヤーを作成します。これにより、ホストポートをコンテナポートに再マップするポートマッピングを作成できます。マッピングは、静的または動的にすることができます。
+      ## 新しい
       ## awsvpcネットワークモードでは、Amazon ECS は各タスクの Elastic Network Interface（ENI）を作成および管理し、各タスクが VPC 内で独自のプライベート IP アドレスを受け取ります
-      NetworkMode: bridge
-      ## このタスクのすべてのコンテナには、このロールに指定されているアクセス許可が付与されます。(今回はAmazonSSMGetParametersPolicy, SecretsManagerGetSecretValuePolicy, AmazonECSTaskExecutionRolePolicy)
-      ## ECRからのimageのpullやcloudwatchへのログ保存のようなECSのアクションに対するIAMRoleの付与
-      ## タスク実行ロール
-      ExecutionRoleArn: !ImportValue iam-role-AmazonECSTaskExecdutionRoleArn
+      NetworkMode: awsvpc
+      ExecutionRoleArn: !ImportValue iam-role-AmazonECSTaskExecutionRoleArn
+      ## 新しい
+      ## リソースの確保をしている
+      Memory: 512
+      ## 新しい
+      ## リソースの確保をしている
+      Cpu: 256
       ContainerDefinitions:
         - Name: app
           Image: !Sub
@@ -193,18 +234,12 @@ Resources:
               - ECRRepository:
                   Fn::ImportValue: !Sub ${SystemName}-${Environment}-ecr-ECRRepositoryApp
           Cpu: 0
-          ## メモリが確保されている、softlimit
           MemoryReservation: 80
-          ## trueの場合コンテナが何らかの理由で失敗または停止すると、タスクに含まれる他のすべてのコンテナは停止される
           Essential: true
-          ## curl -f はサーバーエラーが起きたら出力なしでエラー終了するオプション
-          ## CMD-SHELLは「システムのデフォルトシェルでカンマの後に続くコマンドを実行する」ことを示す
-          ## ||は左側のコマンドが失敗したときに右側のコマンドが実行される。今回はexit 1が実行されて異常終了。exit 0が正常終了
-          ## Linuxコマンド的にはexit 0以外は異常終了
           HealthCheck:
             Command:
               - CMD-SHELL
-              - "curl -f http://127.0.0.1:3000/ || exit 1"
+              - "curl -f http://127.0.0.1:3000/users/ || exit 1"
             StartPeriod: 180
           Secrets:
             - Name: MYSQL_HOST
@@ -229,6 +264,7 @@ Resources:
                       Fn::ImportValue: !Sub ${SystemName}-${Environment}-rds-SecretForRDSAwsmaster
             - Name: RAILS_ENV
               ValueFrom: !Ref SSMParameterAppRailsEnv
+          ## ??
           Environment:
             - Name: RAILS_CONFIG_HOSTS
               Value: !Sub
@@ -236,20 +272,12 @@ Resources:
                   - DomainName:
                       Fn::ImportValue: !Sub ${SystemName}-${Environment}-route53-HostedZoneDomainName
           LogConfiguration:
-            ## AWS Fargate上のタスクでサポートされるログドライバは「awslogs, splunk, awsfirelens」
-            ## Amazon EC2インスタンスでホストされているタスクの場合にサポートされるログドライバは「awslogs, fluentd, gelf, awsfirelens, splunk, journald, json-file」
-            ## awslogsはコンテナのログをcloudwatch Logsへ出力するための設定
             LogDriver: awslogs
             Options:
               awslogs-group: !Ref LogsLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
-          ## Linux KernelCapabilities など、コンテナに適用される Linux 固有のオプションを指定する。
-          ## 管理画面のjsonファイルで確認できる。
           LinuxParameters:
-            ## シグナルを転送し、プロセスを刈り取るコンテナ内の init プロセスを実行します。
-            ## docker runの--initオプションに対応します
-            ## /dev/initが挟まって適切にシグナルをハンドリングしてくれます。
             InitProcessEnabled: true
         - Name: web
           Image: !Sub
@@ -258,69 +286,58 @@ Resources:
                   Fn::ImportValue: !Sub ${SystemName}-${Environment}-ecr-ECRRepositoryWeb
           Cpu: 0
           MemoryReservation: 16
-          ## HostPort: 0の設定によって動的なランダムポートの設定をしている
-          ## EC2インスタンスにENIが割り当てられる。
+          ## 前回はECSタスクがbridgeモードのためランダムポートだったが、今回はawsvpcモードのためポート番号を固定できる
+          ## HostPort: 0の記述が消えている 動的なポート番号を割り当てている部分の記載が消えている
           PortMappings:
-            - HostPort: 0
-              ContainerPort: 80
+            - ContainerPort: 80
               Protocol: tcp
-          ## < 入力のリダイレクト
-          ## > 出力のリダイレクト
-          ## /etc/nginx/conf.d/default.conf.templateに記載されている$$NGINX_BACKENDという変数にappという値を代入(Environment: - Name: NGINX_BACKEND Value: app で設定)
-          ## $$NGINX_BACKENDという変数にappという値を代入した/etc/nginx/conf.d/default.conf.templateファイルを/etc/nginx/conf.d/default.confファイルとして生成し、/etc/nginx/conf.d/default.confファイルを読み込んで起動コマンドでデーモンをオフにしてNginxにフォアグラウンドで起動する命令を出している。フォアグラウンドで実行することによって
+          ## $$NGINX_BACKENDの値を/etc/nginx/conf.d/default.conf.templateに置換して、/etc/nginx/conf.d/default.confを作成する
           Command:
             - /bin/bash
             - -c
             - "envsubst '$$NGINX_BACKEND' < /etc/nginx/conf.d/default.conf.template > /etc/nginx/conf.d/default.conf && exec nginx -g 'daemon off;'"
-          ## trueの場合コンテナが何らかの理由で失敗または停止すると、タスクに含まれる他のすべてのコンテナは停止される
           Essential: true
+          ## 新しい
+          ## Nginx(web)コンテナのポートマッピングで動的ホストポートを削除、NGINX_BACKEND環境変数の値をappから127.0.0.1に変更、リンクappを削除
+          ## 127.0.0.1に変更、リンクappを削除はFargateの仕様のため
           Environment:
             - Name: NGINX_BACKEND
-              Value: app
-          ## Container Ordering?
-          ## appコンテナがHEALTHYになって初めてwebコンテナが起動するようにする設定
+              Value: 127.0.0.1
           DependsOn:
             - ContainerName: app
               Condition: HEALTHY
-          ## appコンテナに繋がってくれる。名前解決してくれる。
-          Links: ## Available only when "NetworkMode: bridge"
-            - app
           LogConfiguration:
-            ## AWS Fargate上のタスクでサポートされるログドライバは「awslogs, splunk, awsfirelens」
-            ## Amazon EC2インスタンスでホストされているタスクの場合にサポートされるログドライバは「awslogs, fluentd, gelf, awsfirelens, splunk, journald, json-file」
-            ## awslogsはコンテナのログをcloudwatch Logsへ出力するための設定
             LogDriver: awslogs
             Options:
               awslogs-group: !Ref LogsLogGroup
               awslogs-region: !Ref AWS::Region
               awslogs-stream-prefix: ecs
-          ## ECS EXECを利用する際にはtrueにした方がいい
           LinuxParameters:
             InitProcessEnabled: true
 
   ## ECS: Service
-  ## ECSタスクの起動台数の設定やどのALBと連携させるかを決定する役割。タスクを実行するネットワークの設定も行う
-  ## タスクが何らかの理由で終了した場合は、タスク定義をベースに新しいタスクを生成して指定したタスク数を維持する。
-  ## ECSのタスクをどういった戦略で置くかを決定。デフォルトではアベイラビリティゾーン全体に分散
+  ## 修正部分・・タスク配置戦略の設定がなくなった。
   Service:
     Type: AWS::ECS::Service
     DependsOn: ELBListenerRule
     Properties:
       ServiceName: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-service
-      ## 基本的にはFargate起動タイプかEC2起動タイプ,EXTERNAL起動タイプ
-      LaunchType: EC2
+      ## 新しい
+      ## キャパシティプロバイダー戦略を使って安いFARGATE_SPOTを優先的に起動する。weightが1なので
+      CapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Base: 0
+          Weight: 0
+        - CapacityProvider: FARGATE_SPOT
+          Base: 0
+          Weight: 1
       TaskDefinition: !Ref TaskDefinition
+      ## 新しい
+      ## サービス内のタスクが実行されているプラットフォームのバージョンです。プラットフォーム・バージョンは、Fargate起動タイプを使用するタスクにのみ指定されます。
+      PlatformVersion: LATEST
       Cluster:
         Fn::ImportValue: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-cluster-Cluster
-      ## サービススケジューラーの概念・・例えば、基盤となるインフラストラクチャに障害が発生した場合、サービススケジューラはタスクを再スケジュールします。タスク配置の戦略と制約を使用して、スケジューラがタスクを配置および終了する方法をカスタマイズできます
-      ## 利用できる 2 つのサービススケジューラ戦略
-      ## レプリカスケジュール戦略では、クラスター全体で必要数のタスクを配置して維持します。
-      ## デーモンのスケジュール戦略では、指定したすべてのタスク配置制約を満たすクラスター内のアクティブなコンテナインスタンスごとに、1 つのタスクのみをデプロイします
-      ## Fargate タスクは DAEMON スケジュール戦略をサポートしない。
-      ## EC2 インスタンスでタスクを実行するサービスを作成する場合、オプションでタスク配置戦略と制約を指定して、タスク配置に関する決定をカスタマイズできます
-      ## タスク配置戦略または制約が指定されていない場合、デフォルトでは、サービススケジューラはタスクをアベイラビリティーゾーン全体に分散する
       SchedulingStrategy: REPLICA
-      ## 指定したタスク定義のインスタンスをクラスターに配置して実行状態に保つ数
       DesiredCount: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
       ## どのくらいの数のタスクを起動させるかのオプション設定
       ## minimumHealthyPercentはデプロイ時に RUNNING 状態に留まる必要があるサービスのタスクの下限数を表す。例えば、サービスで desiredCount が 4 タスク、minimumHealthyPercent が 50% とすると、サービススケジューラは 2 つの新しいタスクを開始する前に、2 つの既存のタスクを停止してクラスターのキャパシティーを解放できます。
@@ -328,30 +345,86 @@ Resources:
       DeploymentConfiguration:
         MinimumHealthyPercent: 100
         MaximumPercent: 200
-      ## タスク配置戦略
-      ## アベイラビリティーゾーン間でタスクを均等に分散するやり方とインスタンス間でタスクを均等に分散するやり方
-      PlacementStrategies:
-        - Field: attribute:ecs.availability-zone
-          Type: spread
-        - Field: instanceId
-          Type: spread
-      ## 画面では確認できない
-      ## サービスのタスクに Amazon ECS マネージドタグを使用するか否かを指定します。
+      ## clusterかserviceのタグをECSタスクにコピー
       EnableECSManagedTags: true
-      ## 画面では確認できない
-      ## コンテナに入れるかどうか
       EnableExecuteCommand: true
+      ## 新しい
+      ## ECSタスクやECSサービスに対するネットワークを定義する
+      NetworkConfiguration:
+        ## ECSタスクにひもづくvpcサブネットとセキュリティグループ定義
+        AwsvpcConfiguration:
+          Subnets:
+            Fn::If:
+              - ShouldUseSubnetProtected
+              - - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetProtectedA
+                - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetProtectedC
+                - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetProtectedD
+              - - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicA
+                - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
+                - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicD
+          SecurityGroups:
+            - !Ref EC2SecurityGroup
+          ## 今回はtrueなのでDISABLED
+          AssignPublicIp: !If [ ShouldUseSubnetProtected, DISABLED, ENABLED ]
       ## Amazon ECS サービススケジューラが、タスクが RUNNING 状態になった後で異常な Elastic Load Balancing ターゲットのヘルスチェック、コンテナのヘルスチェック、Route 53 のヘルスチェックを無視する期間 (秒単位)
       HealthCheckGracePeriodSeconds: 300
-      ## 利用するロードバランサーの設定
-      ## ロードバランサー用のコンテナをwebコンテナに設定
-      ## 振り分け先
+      ## ECSタスクのwebコンテナを80番ポートでALBのターゲットグループのターゲットに登録している
       LoadBalancers:
         - ContainerName: web
           ContainerPort: 80
           TargetGroupArn: !Ref ELBTargetGroup
 
+  ## Comment out because it cannot be edited on the management console.
+  # ## ApplicationAutoScaling: ScalableTarget
+  # ApplicationAutoScalingScalableTarget:
+  #   Type: AWS::ApplicationAutoScaling::ScalableTarget
+  #   Properties:
+  #     ServiceNamespace: ecs
+  #     ScalableDimension: ecs:service:DesiredCount
+  #     ResourceId: !Sub
+  #         - service/${ClusterName}/${Service.Name}
+  #         - ClusterName:
+  #             Fn::ImportValue:
+  #               !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-cluster-Cluster
+  #     MinCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #     MaxCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #     RoleARN: !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/ecs.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_ECSService ## IAM role created automatically.
+  #     ScheduledActions:
+  #       Fn::If:
+  #         - isProd
+  #         - - ScheduledActionName: !Sub ${SystemName}-${Environment}-${ResourceName}-scheduled-action-scale-out
+  #             ScalableTargetAction:
+  #               MinCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #               MaxCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #             Schedule: cron(0 22 ? * SUN-THU) ## Monday-Friday 07:00(JST) @ Prod
+  #           - ScheduledActionName: !Sub ${SystemName}-${Environment}-${ResourceName}-scheduled-action-scale-in
+  #             ScalableTargetAction:
+  #               MinCapacity: 1
+  #               MaxCapacity: 1
+  #             Schedule: cron(0 14 ? * MON-FRI) ## Monday-Friday 23:00(JST) @ Prod
+  #         - - ScheduledActionName: !Sub ${SystemName}-${Environment}-${ResourceName}-scheduled-action-start
+  #             ScalableTargetAction:
+  #               MinCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #               MaxCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, ServiceDesiredCount ]
+  #             Schedule: cron(50 22 ? * SUN-THU) ## Monday-Friday 07:50(JST) @ Not Prod
+  #           - ScheduledActionName: !Sub ${SystemName}-${Environment}-${ResourceName}-scheduled-action-stop
+  #             ScalableTargetAction:
+  #               MinCapacity: 0
+  #               MaxCapacity: 0
+  #             Schedule: cron(0 13 ? * MON-FRI) ## Monday-Friday 22:00(JST) @ Not Prod
+
 Outputs:
+  ## EC2(VPC): Security Group
+  EC2SecurityGroup:
+    Value: !Ref EC2SecurityGroup
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroup
+
+  EC2SecurityGroupVpcId:
+    Value: !GetAtt EC2SecurityGroup.VpcId
+    Export:
+      Name: !Sub ${AWS::StackName}-EC2SecurityGroupVpcId
+
   ## IAM: Role
   IAMRole:
     Value: !Ref IAMRole
@@ -423,3 +496,11 @@ Outputs:
     Value: !GetAtt Service.Name
     Export:
       Name: !Sub ${AWS::StackName}-ServiceName
+
+  ## Comment out because it cannot be edited on the management console.
+  # ## ApplicationAutoScaling: ScalableTarget
+  # ApplicationAutoScalingScalableTarget:
+  #   Value:
+  #     Ref: ApplicationAutoScalingScalableTarget
+  #   Export:
+  #     Name: !Sub ${AWS::StackName}-ApplicationAutoScalingScalableTarget

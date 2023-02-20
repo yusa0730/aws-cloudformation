@@ -131,6 +131,7 @@ Resources:
         ImageId: !Ref EC2ImageId
         IamInstanceProfile:
           Name: !ImportValue iam-role-AmazonSSMManagedECSInstanceProfile
+        ## OSレベルで行われるシャットダウン。EC2インスタンスとしてのステータスをstoppedかterminateにするか
         InstanceInitiatedShutdownBehavior: terminate
         Monitoring:
           Enabled: false
@@ -181,15 +182,21 @@ Resources:
     ## For Japanese translation, please refer to the following.
     ## Ref. https://docs.aws.amazon.com/ja_jp/AWSCloudFormation/latest/UserGuide/aws-attribute-updatepolicy.html
     ## >> IgnoreUnmodifiedGroupSizeProperties
+
+    ## UpdatePolicyを使用して、AWS Resourcesの更新を処理することができる
     UpdatePolicy:
+      ## スケジュールされたアクションが関連づけられている Auto Scalingグループを更新するとき使う
       AutoScalingScheduledAction:
+        ## グループサイズを変更したくない場合はtrueにする
         IgnoreUnmodifiedGroupSizeProperties: true
     Properties:
       AutoScalingGroupName: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-cluster
+      ## インスタンスタイプの混在を設定可能とする
       MixedInstancesPolicy:
         InstancesDistribution:
           OnDemandBaseCapacity: 0
           OnDemandPercentageAboveBaseCapacity: 0
+          ## 空きのあるデータセンターを優先する
           SpotAllocationStrategy: capacity-optimized
           # SpotInstancePools: 4 ## Valid only when the Spot allocation strategy is lowest-price.
         LaunchTemplate:
@@ -209,6 +216,7 @@ Resources:
           - - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicA
             - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicC
             - Fn::ImportValue: !Sub ${SystemName}-${Environment}-vpc-SubnetPublicD
+      ## トラフィックを処理する準備ができていない新しく起動されたインスタンスを、異常なインスタンスと区別する
       HealthCheckGracePeriod: 300
       DesiredCapacity: !FindInMap [ EnvironmentMap, !Ref Environment, AutoScalingDesiredCapacity ]
       MinSize: !FindInMap [ EnvironmentMap, !Ref Environment, AutoScalingMinSize ]

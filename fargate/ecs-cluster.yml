@@ -1,0 +1,63 @@
+---
+### [Change System Name] ishizawa-aws-test
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create ECS Cluster.
+
+Parameters:
+  SystemName:
+    Description: System Name
+    Type: String
+    Default: ishizawa-aws-test ### [Change System Name]
+  Environment:
+    Description: Environment
+    Type: String
+    Default: prod
+    AllowedValues:
+      - prod
+      - stg
+      - dev
+  ResourceName:
+    Description: Resource Name
+    Type: String
+    Default: fg
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Environment Configuration"
+        Parameters:
+          - SystemName
+          - Environment
+          - ResourceName
+
+Resources:
+  ## ECS: Cluster
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub ${SystemName}-${Environment}-${ResourceName}-ecs-cluster
+      CapacityProviders:
+        - FARGATE
+        - FARGATE_SPOT
+      DefaultCapacityProviderStrategy:
+        - CapacityProvider: FARGATE
+          Base: 0
+          Weight: 0
+        - CapacityProvider: FARGATE_SPOT
+          Base: 0
+          Weight: 1
+
+  ## 前回との差分は基盤用のEC2インスタンスを作成する処理が必要ないこと
+
+Outputs:
+  ## ECS: Cluster
+  Cluster:
+    Value: !Ref Cluster
+    Export:
+      Name: !Sub ${AWS::StackName}-Cluster
+
+  ClusterArn:
+    Value: !GetAtt Cluster.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ClusterArn
